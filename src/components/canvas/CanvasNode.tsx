@@ -99,7 +99,7 @@ function getResizedBox(
   return { nx, ny, nw, nh };
 }
 
-export function CanvasNode({ node, isSelected, scale }: { node: FileNode; isSelected: boolean; scale: number }) {
+export function CanvasNode({ node, isSelected, scale, isVisible }: { node: FileNode; isSelected: boolean; scale: number; isVisible: boolean }) {
   const [hovered, setHovered] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -115,6 +115,7 @@ export function CanvasNode({ node, isSelected, scale }: { node: FileNode; isSele
   const textFontSize = node.fontSize ?? DEFAULT_TEXT_FONT_SIZE;
   const textColor = node.fontColor ?? DEFAULT_TEXT_COLOR;
   const minNodeHeight = node.type === "text" ? getTextHeight(node.text ?? "", textFontSize) : MIN_MEDIA_SIZE;
+  const shouldMountVideo = node.type === "video" && isVisible;
 
   const toggleVideo = useCallback(() => {
     const v = videoRef.current;
@@ -437,17 +438,23 @@ export function CanvasNode({ node, isSelected, scale }: { node: FileNode; isSele
 	          <img src={node.blobUrl ?? ""} alt={node.name} draggable={false} className="pointer-events-none h-full w-full" style={{ objectFit: "fill" }} />
 	        ) : (
 	          <>
-	            <video ref={videoRef} src={node.blobUrl ?? ""} preload="metadata" playsInline draggable={false}
-              className="pointer-events-none h-full w-full" style={{ objectFit: "fill" }}
-              muted={muted}
-              loop={loop}
-              onLoadedMetadata={syncVideoState}
-              onDurationChange={syncVideoState}
-              onTimeUpdate={syncVideoState}
-              onPlay={() => setPlaying(true)}
-              onEnded={() => setPlaying(false)}
-              onPause={() => setPlaying(false)} />
-            {!playing && (
+              {shouldMountVideo ? (
+	              <video ref={videoRef} src={node.blobUrl ?? ""} preload="metadata" playsInline draggable={false}
+                className="pointer-events-none h-full w-full" style={{ objectFit: "fill" }}
+                muted={muted}
+                loop={loop}
+                onLoadedMetadata={syncVideoState}
+                onDurationChange={syncVideoState}
+                onTimeUpdate={syncVideoState}
+                onPlay={() => setPlaying(true)}
+                onEnded={() => setPlaying(false)}
+                onPause={() => setPlaying(false)} />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center bg-zinc-950/50 text-xs font-medium text-zinc-500">
+                  Video
+                </div>
+              )}
+            {shouldMountVideo && !playing && (
               <button
                 data-action
                 aria-label="Play video"
@@ -470,7 +477,7 @@ export function CanvasNode({ node, isSelected, scale }: { node: FileNode; isSele
                 <Play size={20 / scale} fill="white" />
               </button>
             )}
-            {(hovered || isSelected || playing) && (
+            {shouldMountVideo && (hovered || isSelected || playing) && (
               <div
                 data-action
                 className="absolute inset-x-2 bottom-2 z-20 rounded-lg border border-white/10 bg-zinc-950/75 px-2 py-1.5 text-white shadow-xl shadow-black/40 backdrop-blur-md"

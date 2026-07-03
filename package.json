@@ -14,7 +14,8 @@
     "dist": "npm run build && electron-builder",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
-    "check:electron": "node scripts/check-electron-static.mjs"
+    "check:electron": "node scripts/check-electron-static.mjs",
+    "check:canvas": "node scripts/check-canvas-optimization.mjs"
   },
   "build": {
     "appId": "com.jiaweichenvfx.ref-tool",

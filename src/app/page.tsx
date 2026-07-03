@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { nanoid } from "nanoid";
 import { Download, FolderOpen, Minimize2, Save, Upload, X } from "lucide-react";
 import { InfiniteCanvas } from "@/components/canvas/InfiniteCanvas";
@@ -19,6 +19,7 @@ const AUTO_RESTORE_LIMIT_BYTES = 256 * 1024 * 1024;
 const AUTO_RESTORE_LIMIT_ITEMS = 80;
 const VIDEO_RESTORE_LIMIT_BYTES = 80 * 1024 * 1024;
 const FULLSCREEN_PADDING = 64;
+const VIEWPORT_RENDER_PADDING = 900;
 
 function nodeToPersisted(node: FileNode, size?: number): PersistedFileNode {
   const { blobUrl, ...persisted } = node;
@@ -264,12 +265,45 @@ function fitMediaSize(width: number, height: number, fallback: { width: number; 
   return { width, height };
 }
 
-async function createFileNode(file: File, index: number, sourceKind: "drop" | "paste", spacing: number): Promise<FileNode> {
+function screenToWorld(clientX: number, clientY: number, viewport: Viewport) {
+  return {
+    x: (clientX - viewport.x) / viewport.k,
+    y: (clientY - viewport.y) / viewport.k,
+  };
+}
+
+function getVisibleWorldRect(viewport: Viewport) {
+  const padding = VIEWPORT_RENDER_PADDING / viewport.k;
+  return {
+    left: -viewport.x / viewport.k - padding,
+    top: -viewport.y / viewport.k - padding,
+    right: (window.innerWidth - viewport.x) / viewport.k + padding,
+    bottom: (window.innerHeight - viewport.y) / viewport.k + padding,
+  };
+}
+
+function isNodeVisible(node: FileNode, rect: { left: number; top: number; right: number; bottom: number }) {
+  return (
+    node.position.x + node.width >= rect.left &&
+    node.position.x <= rect.right &&
+    node.position.y + node.height >= rect.top &&
+    node.position.y <= rect.bottom
+  );
+}
+
+async function createFileNode(
+  file: File,
+  index: number,
+  sourceKind: "drop" | "paste",
+  spacing: number,
+  position?: { x: number; y: number },
+): Promise<FileNode> {
   const isVideo = file.type.startsWith("video/") || /\.(mp4|m4v|webm|mov)$/i.test(file.name);
   const url = URL.createObjectURL(file);
   const fallback = isVideo ? { width: 320, height: 180 } : { width: 280, height: 200 };
   const source: { width: number; height: number; duration?: number } = isVideo ? await readVideoMetadata(url, fallback) : await readImageMetadata(url, fallback);
   const size = fitMediaSize(source.width, source.height, fallback);
+  const base = position ?? { x: 100, y: 100 };
 
   return {
     id: nanoid(),
@@ -284,7 +318,7 @@ async function createFileNode(file: File, index: number, sourceKind: "drop" | "p
     sourceHeight: source.height,
     sourceDuration: source.duration,
     sourceKind,
-    position: { x: 100 + index * spacing, y: 100 + index * spacing },
+    position: { x: base.x + index * spacing, y: base.y + index * spacing },
     width: size.width,
     height: size.height,
     naturalWidth: source.width,
@@ -312,6 +346,14 @@ export default function Page() {
   const zoomRef = useRef(100);
   const fullscreenNode = nodes.find((node) => node.id === fullscreenId) ?? null;
   const selectionTouchesGroup = groups.some((group) => selectedIds.some((id) => group.nodeIds.includes(id)));
+  const visibleWorldRect = useMemo(() => (ready ? getVisibleWorldRect(viewport) : null), [ready, viewport]);
+  const visibleNodes = useMemo(() => {
+    if (!visibleWorldRect) return [];
+    const selected = new Set(selectedIds);
+    return nodes.filter((node) => selected.has(node.id) || isNodeVisible(node, visibleWorldRect));
+  }, [nodes, selectedIds, visibleWorldRect]);
+  const visibleNodeIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
+  const visibleGroups = useMemo(() => groups.filter((group) => group.nodeIds.some((id) => visibleNodeIds.has(id) || selectedIds.includes(id))), [groups, selectedIds, visibleNodeIds]);
 
   const setVP = useCallback((vp: Viewport) => {
     setViewport(vp);
@@ -418,9 +460,10 @@ export default function Page() {
     e.preventDefault(); setDragOver(false);
     const fs = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/") || f.type.startsWith("video/") || /\.(mp4|m4v|webm|mov|jpg|jpeg|png|gif|webp|bmp|svg)$/i.test(f.name));
     if (!fs.length) return;
-    const ns = await Promise.all(fs.map((file, index) => createFileNode(file, index, "drop", 30)));
+    const dropPosition = screenToWorld(e.clientX, e.clientY, viewport);
+    const ns = await Promise.all(fs.map((file, index) => createFileNode(file, index, "drop", 30, dropPosition)));
     useCanvasStore.getState().addNodes(ns);
-  }, []);
+  }, [viewport]);
 
   useEffect(() => {
     const h = async (e: ClipboardEvent) => {
@@ -483,8 +526,8 @@ export default function Page() {
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDrop}>
       <InfiniteCanvas viewport={viewport} onViewportChange={setVP} onCanvasClick={() => useCanvasStore.getState().clearSelection()} onBoxSelect={handleBoxSel}>
-        {groups.map((group) => <CanvasGroupRegion key={group.id} group={group} nodes={nodes} isSelected={selectedGroupId === group.id} scale={viewport.k} />)}
-        {nodes.map((n) => <CanvasNode key={n.id} node={n} isSelected={selectedIds.includes(n.id)} scale={viewport.k} />)}
+        {visibleGroups.map((group) => <CanvasGroupRegion key={group.id} group={group} nodes={nodes} isSelected={selectedGroupId === group.id} scale={viewport.k} />)}
+        {visibleNodes.map((n) => <CanvasNode key={n.id} node={n} isSelected={selectedIds.includes(n.id)} scale={viewport.k} isVisible />)}
       </InfiniteCanvas>
 
       <button
