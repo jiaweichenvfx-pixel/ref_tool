@@ -6,6 +6,7 @@ export type FileNode = {
   type: "image" | "video" | "text";
   name: string;
   blobUrl?: string;
+  thumbnailDataUrl?: string;
   text?: string;
   fontSize?: number;
   fontColor?: string;

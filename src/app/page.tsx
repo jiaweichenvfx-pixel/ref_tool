@@ -21,6 +21,7 @@ const VIDEO_RESTORE_LIMIT_BYTES = 80 * 1024 * 1024;
 const FULLSCREEN_PADDING = 64;
 const VIEWPORT_RENDER_PADDING = 900;
 const BOARD_EMBED_LIMIT_BYTES = 32 * 1024 * 1024;
+const THUMBNAIL_MAX_SIZE = 512;
 const SUPPORTED_FILE_RE = /\.(mp4|m4v|webm|mov|jpg|jpeg|png|gif|webp|bmp|svg)$/i;
 
 function isSupportedFile(file: File) {
@@ -254,6 +255,31 @@ async function readImageMetadata(url: string, fallback: { width: number; height:
   });
 }
 
+function drawThumbnail(
+  source: CanvasImageSource,
+  width: number,
+  height: number,
+) {
+  if (!width || !height) return undefined;
+  const scale = Math.min(THUMBNAIL_MAX_SIZE / width, THUMBNAIL_MAX_SIZE / height, 1);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return undefined;
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.78);
+}
+
+async function createImageThumbnail(url: string, width: number, height: number) {
+  return new Promise<string | undefined>((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(drawThumbnail(img, img.naturalWidth || width, img.naturalHeight || height));
+    img.onerror = () => resolve(undefined);
+    img.src = url;
+  });
+}
+
 async function readVideoMetadata(url: string, fallback: { width: number; height: number }) {
   return new Promise<{ width: number; height: number; duration?: number }>((resolve) => {
     const video = document.createElement("video");
@@ -268,6 +294,33 @@ async function readVideoMetadata(url: string, fallback: { width: number; height:
     video.onerror = () => {
       resolve(fallback);
     };
+    video.src = url;
+  });
+}
+
+async function createVideoThumbnail(url: string, width: number, height: number) {
+  return new Promise<string | undefined>((resolve) => {
+    const video = document.createElement("video");
+    let settled = false;
+    const settle = (thumbnail?: string) => {
+      if (settled) return;
+      settled = true;
+      video.removeAttribute("src");
+      video.load();
+      resolve(thumbnail);
+    };
+
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      const targetTime = Number.isFinite(video.duration) && video.duration > 0 ? Math.min(0.2, video.duration / 4) : 0;
+      if (targetTime > 0) video.currentTime = targetTime;
+      else settle(drawThumbnail(video, video.videoWidth || width, video.videoHeight || height));
+    };
+    video.onseeked = () => settle(drawThumbnail(video, video.videoWidth || width, video.videoHeight || height));
+    video.onerror = () => settle(undefined);
+    window.setTimeout(() => settle(undefined), 2200);
     video.src = url;
   });
 }
@@ -320,6 +373,9 @@ async function createFileNode(
   const fallback = isVideo ? { width: 320, height: 180 } : { width: 280, height: 200 };
   const source: { width: number; height: number; duration?: number } = isVideo ? await readVideoMetadata(url, fallback) : await readImageMetadata(url, fallback);
   const size = fitMediaSize(source.width, source.height, fallback);
+  const thumbnailDataUrl = isVideo
+    ? await createVideoThumbnail(url, source.width, source.height)
+    : await createImageThumbnail(url, source.width, source.height);
   const base = position ?? { x: 100, y: 100 };
 
   return {
@@ -327,6 +383,7 @@ async function createFileNode(
     type: isVideo ? "video" : "image",
     name: file.name || (isVideo ? "Pasted video" : "Pasted image"),
     blobUrl: url,
+    thumbnailDataUrl,
     sourceName: file.name || (isVideo ? "Pasted video" : "Pasted image"),
     sourceType: file.type || (isVideo ? "video/*" : "image/*"),
     sourceSize: file.size,

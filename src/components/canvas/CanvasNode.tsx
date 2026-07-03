@@ -435,7 +435,7 @@ export function CanvasNode({ node, isSelected, scale, isVisible }: { node: FileN
 	        ) : node.type === "image" ? (
 	          // Blob URLs are local user files; next/image cannot optimize them.
 	          // eslint-disable-next-line @next/next/no-img-element
-	          <img src={node.blobUrl ?? ""} alt={node.name} draggable={false} className="pointer-events-none h-full w-full" style={{ objectFit: "fill" }} />
+	          <img src={node.thumbnailDataUrl ?? node.blobUrl ?? ""} alt={node.name} draggable={false} className="pointer-events-none h-full w-full" style={{ objectFit: "fill" }} />
 	        ) : (
 	          <>
               {shouldMountVideo ? (
@@ -450,9 +450,14 @@ export function CanvasNode({ node, isSelected, scale, isVisible }: { node: FileN
                 onEnded={() => setPlaying(false)}
                 onPause={() => setPlaying(false)} />
               ) : (
-                <div className="flex h-full w-full items-center justify-center bg-zinc-950/50 text-xs font-medium text-zinc-500">
-                  Video
-                </div>
+                node.thumbnailDataUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={node.thumbnailDataUrl} alt={node.name} draggable={false} className="pointer-events-none h-full w-full opacity-80" style={{ objectFit: "fill" }} />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center bg-zinc-950/50 text-xs font-medium text-zinc-500">
+                    Video
+                  </div>
+                )
               )}
             {shouldMountVideo && !playing && (
               <button
