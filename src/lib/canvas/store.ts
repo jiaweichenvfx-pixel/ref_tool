@@ -3,7 +3,7 @@ import type { CanvasGroup, FileNode, Position } from "./types";
 import { nanoid } from "nanoid";
 
 const ALIGN_GAP = 12;
-const HISTORY_LIMIT = 80;
+const HISTORY_LIMIT = 50;
 const GROUP_HIT_PAD = 18;
 const GROUP_HIT_HEADER = 40;
 const DEFAULT_TEXT_FONT_SIZE = 50;

@@ -20,6 +20,18 @@ const AUTO_RESTORE_LIMIT_ITEMS = 80;
 const VIDEO_RESTORE_LIMIT_BYTES = 80 * 1024 * 1024;
 const FULLSCREEN_PADDING = 64;
 const VIEWPORT_RENDER_PADDING = 900;
+const BOARD_EMBED_LIMIT_BYTES = 32 * 1024 * 1024;
+const SUPPORTED_FILE_RE = /\.(mp4|m4v|webm|mov|jpg|jpeg|png|gif|webp|bmp|svg)$/i;
+
+function isSupportedFile(file: File) {
+  return file.type.startsWith("image/") || file.type.startsWith("video/") || SUPPORTED_FILE_RE.test(file.name);
+}
+
+function revokeNodeUrls(nodes: FileNode[]) {
+  for (const node of nodes) {
+    if (node.blobUrl) URL.revokeObjectURL(node.blobUrl);
+  }
+}
 
 function nodeToPersisted(node: FileNode, size?: number): PersistedFileNode {
   const { blobUrl, ...persisted } = node;
@@ -57,10 +69,15 @@ async function persist(nodes: FileNode[], groups: CanvasGroup[]) {
 }
 
 async function serializeCanvas(nodes: FileNode[], groups: CanvasGroup[]) {
+  let skippedMedia = 0;
   const items = await Promise.all(nodes.map(async (node) => {
     if (node.type === "text") return { ...node };
     if (!node.blobUrl) return { ...node, blobData: "" };
     const blob = await (await fetch(node.blobUrl)).blob();
+    if (blob.size > BOARD_EMBED_LIMIT_BYTES) {
+      skippedMedia += 1;
+      return { ...node, blobUrl: undefined, blobData: "", size: blob.size, skippedBlob: true };
+    }
     const blobData = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
@@ -70,7 +87,7 @@ async function serializeCanvas(nodes: FileNode[], groups: CanvasGroup[]) {
     return { ...node, blobUrl: undefined, blobData, mime: blob.type, size: blob.size };
   }));
 
-  return JSON.stringify({ version: 1, savedAt: Date.now(), nodes: items, groups });
+  return { data: JSON.stringify({ version: 1, savedAt: Date.now(), nodes: items, groups }), skippedMedia };
 }
 
 async function deserializeCanvas(data: string) {
@@ -344,6 +361,7 @@ export default function Page() {
   const [status, setStatus] = useState<string | null>(null);
   const [, forceUpdate] = useState(0);
   const zoomRef = useRef(100);
+  const statusTimerRef = useRef<number | null>(null);
   const fullscreenNode = nodes.find((node) => node.id === fullscreenId) ?? null;
   const selectionTouchesGroup = groups.some((group) => selectedIds.some((id) => group.nodeIds.includes(id)));
   const visibleWorldRect = useMemo(() => (ready ? getVisibleWorldRect(viewport) : null), [ready, viewport]);
@@ -360,6 +378,15 @@ export default function Page() {
     zoomRef.current = Math.round(vp.k * 100);
   }, []);
 
+  const showStatus = useCallback((message: string, timeout = 1800) => {
+    setStatus(message);
+    if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current);
+    statusTimerRef.current = window.setTimeout(() => {
+      setStatus(null);
+      statusTimerRef.current = null;
+    }, timeout);
+  }, []);
+
   const loadSavedCanvas = useCallback(async (force = false) => {
     const result = await restore({ force });
     if (result.status === "blocked") {
@@ -372,9 +399,7 @@ export default function Page() {
   }, []);
 
   const clearSavedCanvas = useCallback(async () => {
-    for (const node of useCanvasStore.getState().nodes) {
-      if (node.blobUrl) URL.revokeObjectURL(node.blobUrl);
-    }
+    revokeNodeUrls(useCanvasStore.getState().nodes);
     useCanvasStore.setState({ nodes: [], groups: [], selectedIds: [], selectedGroupId: null, historyPast: [], historyFuture: [] });
     try { localStorage.removeItem(META_KEY); } catch {}
     await clearBlobs();
@@ -390,7 +415,8 @@ export default function Page() {
     const s = useCanvasStore.getState();
     if (!s.nodes.length) return;
     const savedAt = Date.now();
-    const data = await serializeCanvas(s.nodes, s.groups);
+    showStatus("Saving canvas...", 6000);
+    const { data, skippedMedia } = await serializeCanvas(s.nodes, s.groups);
     await saveBoardRecord({
       id: `board-${savedAt}`,
       name: `Canvas ${new Date(savedAt).toLocaleString()}`,
@@ -401,23 +427,19 @@ export default function Page() {
     });
     await persist(s.nodes, s.groups);
     await refreshBoards();
-    setStatus("Canvas saved");
-    window.setTimeout(() => setStatus(null), 1600);
-  }, [refreshBoards]);
+    showStatus(skippedMedia ? `Canvas saved · ${skippedMedia} large media skipped in board snapshot` : "Canvas saved");
+  }, [refreshBoards, showStatus]);
 
   const loadSavedBoard = useCallback(async (id: string) => {
     const record = await loadBoardRecord(id);
     if (!record) return;
     const restored = await deserializeCanvas(record.data);
-    for (const node of useCanvasStore.getState().nodes) {
-      if (node.blobUrl) URL.revokeObjectURL(node.blobUrl);
-    }
+    revokeNodeUrls(useCanvasStore.getState().nodes);
     useCanvasStore.setState({ nodes: restored.nodes, groups: restored.groups, selectedIds: [], selectedGroupId: null, historyPast: [], historyFuture: [] });
     await persist(restored.nodes, restored.groups);
     setShowBoards(false);
-    setStatus("Canvas loaded");
-    window.setTimeout(() => setStatus(null), 1600);
-  }, []);
+    showStatus("Canvas loaded");
+  }, [showStatus]);
 
   const exportSelected = useCallback(async () => {
     const s = useCanvasStore.getState();
@@ -458,26 +480,42 @@ export default function Page() {
 
   const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault(); setDragOver(false);
-    const fs = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/") || f.type.startsWith("video/") || /\.(mp4|m4v|webm|mov|jpg|jpeg|png|gif|webp|bmp|svg)$/i.test(f.name));
-    if (!fs.length) return;
+    const droppedFiles = Array.from(e.dataTransfer.files);
+    const fs = droppedFiles.filter(isSupportedFile);
+    const skipped = droppedFiles.length - fs.length;
+    if (!fs.length) {
+      if (skipped) showStatus(`Unsupported file${skipped > 1 ? "s" : ""}: ${skipped}`);
+      return;
+    }
+    showStatus(`Importing ${fs.length} file${fs.length > 1 ? "s" : ""}...`, 6000);
     const dropPosition = screenToWorld(e.clientX, e.clientY, viewport);
     const ns = await Promise.all(fs.map((file, index) => createFileNode(file, index, "drop", 30, dropPosition)));
     useCanvasStore.getState().addNodes(ns);
-  }, [viewport]);
+    showStatus(skipped ? `Imported ${ns.length} · skipped ${skipped} unsupported` : `Imported ${ns.length} file${ns.length > 1 ? "s" : ""}`);
+  }, [showStatus, viewport]);
 
   useEffect(() => {
     const h = async (e: ClipboardEvent) => {
       if (!e.clipboardData) return;
       const items = Array.from(e.clipboardData.items).filter((it) => it.type.startsWith("image/") || it.type.startsWith("video/"));
       if (!items.length) return; e.preventDefault();
+      showStatus(`Pasting ${items.length} item${items.length > 1 ? "s" : ""}...`, 6000);
       const ns: FileNode[] = [];
       for (let i = 0; i < items.length; i++) {
         const file = items[i].getAsFile();
         if (file) ns.push(await createFileNode(file, i, "paste", 40));
       }
       if (ns.length) useCanvasStore.getState().addNodes(ns);
+      if (ns.length) showStatus(`Pasted ${ns.length} item${ns.length > 1 ? "s" : ""}`);
     };
     document.addEventListener("paste", h); return () => document.removeEventListener("paste", h);
+  }, [showStatus]);
+
+  useEffect(() => {
+    return () => {
+      if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current);
+      revokeNodeUrls(useCanvasStore.getState().nodes);
+    };
   }, []);
 
   useEffect(() => {
