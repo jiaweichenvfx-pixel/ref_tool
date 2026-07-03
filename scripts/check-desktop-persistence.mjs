@@ -26,6 +26,8 @@ const checks = [
     "main process owns project dialogs and local media protocol",
     /const mediaScheme = "ref-media"/.test(mainSource) &&
       /protocol\.handle\(mediaScheme/.test(mainSource) &&
+      /getMediaIdFromUrl/.test(mainSource) &&
+      /\$\{mediaScheme\}:\/\/media\/\$\{encodeURIComponent\(id\)\}/.test(mainSource) &&
       /parseRangeHeader/.test(mainSource) &&
       /content-range/.test(mainSource) &&
       /"accept-ranges": "bytes"/.test(mainSource) &&
@@ -49,7 +51,7 @@ const checks = [
   ],
   [
     "canvas rendering can use registered desktop source urls",
-    /node\.sourceUrl \?\? node\.blobUrl/.test(nodeSource) &&
+    /node\.blobUrl \?\? node\.sourceUrl/.test(nodeSource) &&
       /sourceMissing/.test(nodeSource),
   ],
 ];

@@ -33,6 +33,12 @@ const MIME_TYPES = {
   ".txt": "text/plain; charset=utf-8",
 };
 
+function getMediaIdFromUrl(url) {
+  const requestUrl = new URL(url);
+  const pathId = requestUrl.pathname.replace(/^\/+/, "");
+  return decodeURIComponent(pathId || requestUrl.hostname);
+}
+
 function parseRangeHeader(rangeHeader, size) {
   const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader ?? "");
   if (!match) return null;
@@ -130,8 +136,7 @@ async function registerStaticProtocol() {
   });
 
   protocol.handle(mediaScheme, async (request) => {
-    const requestUrl = new URL(request.url);
-    const id = decodeURIComponent(requestUrl.hostname || requestUrl.pathname.replace(/^\//, ""));
+    const id = getMediaIdFromUrl(request.url);
     const sourcePath = mediaPaths.get(id);
 
     if (!sourcePath) return new Response("Media path is not registered", { status: 404 });
@@ -197,7 +202,7 @@ function registerDesktopIpc() {
       mediaPaths.set(id, sourcePath);
       return {
         ok: true,
-        url: `${mediaScheme}://${encodeURIComponent(id)}`,
+        url: `${mediaScheme}://media/${encodeURIComponent(id)}`,
         size: stats.size,
         lastModified: stats.mtimeMs,
       };

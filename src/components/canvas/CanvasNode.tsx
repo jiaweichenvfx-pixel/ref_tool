@@ -116,7 +116,7 @@ export function CanvasNode({ node, isSelected, scale, isVisible }: { node: FileN
   const textColor = node.fontColor ?? DEFAULT_TEXT_COLOR;
   const minNodeHeight = node.type === "text" ? getTextHeight(node.text ?? "", textFontSize) : MIN_MEDIA_SIZE;
   const shouldMountVideo = node.type === "video" && isVisible;
-  const mediaSrc = node.sourceUrl ?? node.blobUrl;
+  const mediaSrc = node.blobUrl ?? node.sourceUrl;
 
   const toggleVideo = useCallback(() => {
     const v = videoRef.current;
