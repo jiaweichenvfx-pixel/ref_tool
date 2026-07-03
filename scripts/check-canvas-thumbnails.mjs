@@ -19,7 +19,8 @@ const checks = [
   ],
   [
     "canvas image preview can use thumbnails",
-    /node\.thumbnailDataUrl \?\? node\.blobUrl/.test(nodeSource),
+    /node\.thumbnailDataUrl \?\? mediaSrc/.test(nodeSource) &&
+      /const mediaSrc = node\.sourceUrl \?\? node\.blobUrl/.test(nodeSource),
   ],
   [
     "video placeholder can show thumbnail frame",

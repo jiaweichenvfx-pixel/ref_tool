@@ -116,6 +116,7 @@ export function CanvasNode({ node, isSelected, scale, isVisible }: { node: FileN
   const textColor = node.fontColor ?? DEFAULT_TEXT_COLOR;
   const minNodeHeight = node.type === "text" ? getTextHeight(node.text ?? "", textFontSize) : MIN_MEDIA_SIZE;
   const shouldMountVideo = node.type === "video" && isVisible;
+  const mediaSrc = node.sourceUrl ?? node.blobUrl;
 
   const toggleVideo = useCallback(() => {
     const v = videoRef.current;
@@ -214,7 +215,7 @@ export function CanvasNode({ node, isSelected, scale, isVisible }: { node: FileN
       setDuration(0);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [node.blobUrl]);
+  }, [mediaSrc]);
 
   useEffect(() => {
     if (!editingText) return;
@@ -435,11 +436,11 @@ export function CanvasNode({ node, isSelected, scale, isVisible }: { node: FileN
 	        ) : node.type === "image" ? (
 	          // Blob URLs are local user files; next/image cannot optimize them.
 	          // eslint-disable-next-line @next/next/no-img-element
-	          <img src={node.thumbnailDataUrl ?? node.blobUrl ?? ""} alt={node.name} draggable={false} className="pointer-events-none h-full w-full" style={{ objectFit: "fill" }} />
+	          <img src={node.thumbnailDataUrl ?? mediaSrc ?? ""} alt={node.name} draggable={false} className="pointer-events-none h-full w-full" style={{ objectFit: "fill" }} />
 	        ) : (
 	          <>
               {shouldMountVideo ? (
-	              <video ref={videoRef} src={node.blobUrl ?? ""} preload="metadata" playsInline draggable={false}
+	              <video ref={videoRef} src={mediaSrc ?? ""} preload="metadata" playsInline draggable={false}
                 className="pointer-events-none h-full w-full" style={{ objectFit: "fill" }}
                 muted={muted}
                 loop={loop}
@@ -458,6 +459,11 @@ export function CanvasNode({ node, isSelected, scale, isVisible }: { node: FileN
                     Video
                   </div>
                 )
+              )}
+              {node.sourceMissing && (
+                <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-black/55 text-xs font-semibold uppercase tracking-wide text-red-200">
+                  Missing Source
+                </div>
               )}
             {shouldMountVideo && !playing && (
               <button

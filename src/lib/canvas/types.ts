@@ -7,6 +7,10 @@ export type FileNode = {
   name: string;
   blobUrl?: string;
   thumbnailDataUrl?: string;
+  sourcePath?: string;
+  sourceUrl?: string;
+  sourceMissing?: boolean;
+  sourceFingerprint?: string;
   text?: string;
   fontSize?: number;
   fontColor?: string;

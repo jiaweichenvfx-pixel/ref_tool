@@ -13,6 +13,39 @@ import { arrangeNodes } from "@/lib/canvas/arrange";
 import { clearBlobs, deleteBlob, listBlobKeys, loadBlob, saveBlob, listBoardRecords, loadBoardRecord, saveBoardRecord, type SavedBoardRecord } from "@/lib/canvas/storage";
 import type { CanvasGroup, FileNode, PersistedFileNode, Viewport } from "@/lib/canvas/types";
 
+type DesktopMediaRegistration = {
+  ok: boolean;
+  url?: string;
+  size?: number;
+  lastModified?: number;
+  missing?: boolean;
+  error?: string;
+};
+
+type DesktopProjectResult = {
+  ok: boolean;
+  canceled?: boolean;
+  path?: string;
+  project?: PersistedProject;
+  error?: string;
+};
+
+type DesktopApi = {
+  isDesktop: boolean;
+  platform: string;
+  getPathForFile: (file: File) => string;
+  registerMediaPath: (id: string, sourcePath: string) => Promise<DesktopMediaRegistration>;
+  saveProject: (projectJson: PersistedProject, defaultName: string) => Promise<DesktopProjectResult>;
+  openProject: () => Promise<DesktopProjectResult>;
+  saveFileCopy: (sourcePath: string, defaultName: string) => Promise<DesktopProjectResult>;
+};
+
+declare global {
+  interface Window {
+    refToolDesktop?: DesktopApi;
+  }
+}
+
 const META_KEY = "cd-meta2";
 const GROUPS_KEY = "cd-groups1";
 const AUTO_RESTORE_LIMIT_BYTES = 256 * 1024 * 1024;
@@ -23,6 +56,22 @@ const VIEWPORT_RENDER_PADDING = 900;
 const BOARD_EMBED_LIMIT_BYTES = 32 * 1024 * 1024;
 const THUMBNAIL_MAX_SIZE = 512;
 const SUPPORTED_FILE_RE = /\.(mp4|m4v|webm|mov|jpg|jpeg|png|gif|webp|bmp|svg)$/i;
+
+type PersistedProjectNode = Omit<FileNode, "blobUrl" | "sourceUrl"> & {
+  blobData?: string;
+  mime?: string;
+  persistedBy?: "source-path" | "embedded-blob" | "metadata-only" | "text";
+  size?: number;
+  skippedBlob?: boolean;
+};
+
+type PersistedProject = {
+  version: number;
+  savedAt: number;
+  viewport?: Viewport;
+  nodes: PersistedProjectNode[];
+  groups: CanvasGroup[];
+};
 
 function isSupportedFile(file: File) {
   return file.type.startsWith("image/") || file.type.startsWith("video/") || SUPPORTED_FILE_RE.test(file.name);
@@ -35,9 +84,32 @@ function revokeNodeUrls(nodes: FileNode[]) {
 }
 
 function nodeToPersisted(node: FileNode, size?: number): PersistedFileNode {
-  const { blobUrl, ...persisted } = node;
+  const { blobUrl, sourceUrl, ...persisted } = node;
   void blobUrl;
+  void sourceUrl;
   return size !== undefined ? { ...persisted, size } : persisted;
+}
+
+function getDesktopApi() {
+  return typeof window === "undefined" ? undefined : window.refToolDesktop;
+}
+
+function sourceFingerprint(file: File, sourcePath?: string) {
+  return [sourcePath ?? file.name, file.size, file.lastModified || 0].join(":");
+}
+
+async function registerSourceLinkedMedia(node: FileNode): Promise<FileNode> {
+  const desktop = getDesktopApi();
+  if (!desktop || !node.sourcePath || node.type === "text") return node;
+
+  const result = await desktop.registerMediaPath(node.id, node.sourcePath);
+  return {
+    ...node,
+    sourceUrl: result.ok ? result.url : undefined,
+    sourceMissing: !result.ok,
+    sourceSize: result.size ?? node.sourceSize,
+    sourceLastModified: result.lastModified ?? node.sourceLastModified,
+  };
 }
 
 async function persist(nodes: FileNode[], groups: CanvasGroup[]) {
@@ -51,6 +123,11 @@ async function persist(nodes: FileNode[], groups: CanvasGroup[]) {
   for (const n of nodes) {
     if (n.type === "text") {
       meta.push(nodeToPersisted(n));
+      continue;
+    }
+    if (n.sourcePath) {
+      await deleteBlob(n.id);
+      meta.push(nodeToPersisted(n, n.sourceSize));
       continue;
     }
     try {
@@ -72,12 +149,21 @@ async function persist(nodes: FileNode[], groups: CanvasGroup[]) {
 async function serializeCanvas(nodes: FileNode[], groups: CanvasGroup[]) {
   let skippedMedia = 0;
   const items = await Promise.all(nodes.map(async (node) => {
-    if (node.type === "text") return { ...node };
-    if (!node.blobUrl) return { ...node, blobData: "" };
+    if (node.type === "text") return { ...node, blobUrl: undefined, sourceUrl: undefined, persistedBy: "text" };
+    if (node.sourcePath) {
+      return {
+        ...node,
+        blobUrl: undefined,
+        sourceUrl: undefined,
+        blobData: "",
+        persistedBy: "source-path",
+      };
+    }
+    if (!node.blobUrl) return { ...node, blobUrl: undefined, sourceUrl: undefined, blobData: "", persistedBy: "metadata-only" };
     const blob = await (await fetch(node.blobUrl)).blob();
     if (blob.size > BOARD_EMBED_LIMIT_BYTES) {
       skippedMedia += 1;
-      return { ...node, blobUrl: undefined, blobData: "", size: blob.size, skippedBlob: true };
+      return { ...node, blobUrl: undefined, sourceUrl: undefined, blobData: "", size: blob.size, skippedBlob: true, persistedBy: "metadata-only" };
     }
     const blobData = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -85,29 +171,50 @@ async function serializeCanvas(nodes: FileNode[], groups: CanvasGroup[]) {
       reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(blob);
     });
-    return { ...node, blobUrl: undefined, blobData, mime: blob.type, size: blob.size };
+    return { ...node, blobUrl: undefined, sourceUrl: undefined, blobData, mime: blob.type, size: blob.size, persistedBy: "embedded-blob" };
   }));
 
   return { data: JSON.stringify({ version: 1, savedAt: Date.now(), nodes: items, groups }), skippedMedia };
 }
 
 async function deserializeCanvas(data: string) {
-  const parsed = JSON.parse(data) as { nodes?: Array<FileNode & { blobData?: string }>; groups?: CanvasGroup[] };
+  const parsed = JSON.parse(data) as { nodes?: Array<PersistedProjectNode>; groups?: CanvasGroup[] };
   const restoredNodes: FileNode[] = [];
   for (const node of parsed.nodes ?? []) {
     if (node.type === "text") {
       restoredNodes.push({ ...node, blobUrl: undefined });
       continue;
     }
-    if (!node.blobData) continue;
-    const blob = await (await fetch(node.blobData)).blob();
-    restoredNodes.push({ ...node, blobUrl: URL.createObjectURL(blob) });
+    const { blobData, persistedBy, skippedBlob, mime, size, ...restored } = node;
+    void persistedBy;
+    void skippedBlob;
+    void mime;
+    const baseNode: FileNode = { ...restored, sourceMissing: false };
+    if (baseNode.sourcePath) {
+      restoredNodes.push(await registerSourceLinkedMedia(baseNode));
+      continue;
+    }
+    if (!blobData) {
+      restoredNodes.push({ ...baseNode, sourceMissing: true, sourceSize: baseNode.sourceSize ?? size });
+      continue;
+    }
+    const blob = await (await fetch(blobData)).blob();
+    restoredNodes.push({ ...baseNode, blobUrl: URL.createObjectURL(blob) });
   }
   const nodeIds = new Set(restoredNodes.map((node) => node.id));
   const restoredGroups = (parsed.groups ?? [])
     .map((group) => ({ ...group, nodeIds: group.nodeIds.filter((id) => nodeIds.has(id)) }))
     .filter((group) => group.nodeIds.length >= 2);
   return { nodes: restoredNodes, groups: restoredGroups };
+}
+
+async function createProject(nodes: FileNode[], groups: CanvasGroup[], viewport?: Viewport) {
+  const { data, skippedMedia } = await serializeCanvas(nodes, groups);
+  return {
+    project: { ...JSON.parse(data), version: 2, viewport } as PersistedProject,
+    skippedMedia,
+    sourceLinkedMedia: nodes.filter((node) => node.type !== "text" && node.sourcePath).length,
+  };
 }
 
 type RestoreResult =
@@ -127,7 +234,7 @@ function parseStoredMeta(): PersistedFileNode[] {
 }
 
 function storedBytes(meta: PersistedFileNode[]) {
-  return meta.reduce((sum, n) => sum + (Number.isFinite(n.size) ? n.size ?? 0 : 0), 0);
+  return meta.reduce((sum, n) => sum + (!n.sourcePath && Number.isFinite(n.size) ? n.size ?? 0 : 0), 0);
 }
 
 function parseStoredGroups(): CanvasGroup[] {
@@ -165,7 +272,7 @@ async function restore(options: { force?: boolean } = {}): Promise<RestoreResult
   const meta = parseStoredMeta();
   const totalBytes = storedBytes(meta);
   if (!meta.length) return { status: "empty", nodes: [], groups: [], totalBytes: 0, itemCount: 0 };
-  const largeVideo = meta.find((n) => n.type === "video" && (n.size ?? 0) > VIDEO_RESTORE_LIMIT_BYTES);
+  const largeVideo = meta.find((n) => n.type === "video" && !n.sourcePath && (n.size ?? 0) > VIDEO_RESTORE_LIMIT_BYTES);
   if (!options.force && (meta.length > AUTO_RESTORE_LIMIT_ITEMS || totalBytes > AUTO_RESTORE_LIMIT_BYTES || largeVideo)) {
     const reason = largeVideo
       ? `Saved video "${largeVideo.name}" is too large to auto-restore safely.`
@@ -177,6 +284,11 @@ async function restore(options: { force?: boolean } = {}): Promise<RestoreResult
     const node = restoreNodeMeta(m);
     if (m.type === "text") {
       out.push({ ...node, text: node.text ?? "", blobUrl: undefined });
+      continue;
+    }
+
+    if (node.sourcePath) {
+      out.push(await registerSourceLinkedMedia(node));
       continue;
     }
 
@@ -370,6 +482,10 @@ async function createFileNode(
 ): Promise<FileNode> {
   const isVideo = file.type.startsWith("video/") || /\.(mp4|m4v|webm|mov)$/i.test(file.name);
   const url = URL.createObjectURL(file);
+  const desktop = getDesktopApi();
+  const sourcePath = sourceKind === "drop" ? desktop?.getPathForFile(file) || undefined : undefined;
+  const sourceId = nanoid();
+  const registered = sourcePath ? await desktop?.registerMediaPath(sourceId, sourcePath) : undefined;
   const fallback = isVideo ? { width: 320, height: 180 } : { width: 280, height: 200 };
   const source: { width: number; height: number; duration?: number } = isVideo ? await readVideoMetadata(url, fallback) : await readImageMetadata(url, fallback);
   const size = fitMediaSize(source.width, source.height, fallback);
@@ -379,15 +495,19 @@ async function createFileNode(
   const base = position ?? { x: 100, y: 100 };
 
   return {
-    id: nanoid(),
+    id: sourceId,
     type: isVideo ? "video" : "image",
     name: file.name || (isVideo ? "Pasted video" : "Pasted image"),
     blobUrl: url,
     thumbnailDataUrl,
+    sourcePath,
+    sourceUrl: registered?.ok ? registered.url : undefined,
+    sourceMissing: sourcePath ? !registered?.ok : false,
+    sourceFingerprint: sourceFingerprint(file, sourcePath),
     sourceName: file.name || (isVideo ? "Pasted video" : "Pasted image"),
     sourceType: file.type || (isVideo ? "video/*" : "image/*"),
-    sourceSize: file.size,
-    sourceLastModified: file.lastModified || undefined,
+    sourceSize: registered?.size ?? file.size,
+    sourceLastModified: registered?.lastModified ?? (file.lastModified || undefined),
     sourceWidth: source.width,
     sourceHeight: source.height,
     sourceDuration: source.duration,
@@ -473,7 +593,8 @@ export default function Page() {
     if (!s.nodes.length) return;
     const savedAt = Date.now();
     showStatus("Saving canvas...", 6000);
-    const { data, skippedMedia } = await serializeCanvas(s.nodes, s.groups);
+    const { project, skippedMedia, sourceLinkedMedia } = await createProject(s.nodes, s.groups, viewport);
+    const data = JSON.stringify(project);
     await saveBoardRecord({
       id: `board-${savedAt}`,
       name: `Canvas ${new Date(savedAt).toLocaleString()}`,
@@ -484,8 +605,59 @@ export default function Page() {
     });
     await persist(s.nodes, s.groups);
     await refreshBoards();
-    showStatus(skippedMedia ? `Canvas saved · ${skippedMedia} large media skipped in board snapshot` : "Canvas saved");
-  }, [refreshBoards, showStatus]);
+    showStatus(skippedMedia ? `Canvas saved · ${sourceLinkedMedia} source linked · ${skippedMedia} large media skipped` : `Canvas saved · ${sourceLinkedMedia} source linked`);
+  }, [refreshBoards, showStatus, viewport]);
+
+  const saveProjectFile = useCallback(async () => {
+    const desktop = getDesktopApi();
+    const s = useCanvasStore.getState();
+    if (!s.nodes.length) return;
+    if (!desktop) {
+      showStatus("Desktop save is available in the packaged app");
+      return;
+    }
+
+    showStatus("Saving project file...", 6000);
+    const { project, skippedMedia, sourceLinkedMedia } = await createProject(s.nodes, s.groups, viewport);
+    const result = await desktop.saveProject(project, `Ref Tool ${new Date(project.savedAt).toISOString().slice(0, 10)}.reftool`);
+    if (result.canceled) {
+      showStatus("Project save canceled");
+      return;
+    }
+    if (!result.ok) {
+      showStatus(result.error ? `Save failed: ${result.error}` : "Project save failed", 4000);
+      return;
+    }
+    showStatus(skippedMedia ? `Project saved · ${sourceLinkedMedia} source linked · ${skippedMedia} large media skipped` : `Project saved · ${sourceLinkedMedia} source linked`);
+  }, [showStatus, viewport]);
+
+  const openProjectFile = useCallback(async () => {
+    const desktop = getDesktopApi();
+    if (!desktop) {
+      showStatus("Desktop open is available in the packaged app");
+      return;
+    }
+
+    showStatus("Opening project file...", 6000);
+    const result = await desktop.openProject();
+    if (result.canceled) {
+      showStatus("Project open canceled");
+      return;
+    }
+    if (!result.ok || !result.project) {
+      showStatus(result.error ? `Open failed: ${result.error}` : "Project open failed", 4000);
+      return;
+    }
+
+    const restored = await deserializeCanvas(JSON.stringify(result.project));
+    revokeNodeUrls(useCanvasStore.getState().nodes);
+    useCanvasStore.setState({ nodes: restored.nodes, groups: restored.groups, selectedIds: [], selectedGroupId: null, historyPast: [], historyFuture: [] });
+    if (result.project.viewport) setVP(result.project.viewport);
+    await persist(restored.nodes, restored.groups);
+    setShowBoards(false);
+    const missing = restored.nodes.filter((node) => node.sourceMissing).length;
+    showStatus(missing ? `Project loaded · ${missing} source file missing` : "Project loaded");
+  }, [setVP, showStatus]);
 
   const loadSavedBoard = useCallback(async (id: string) => {
     const record = await loadBoardRecord(id);
@@ -506,10 +678,16 @@ export default function Page() {
       downloadBlob(new Blob([node.text ?? ""], { type: "text/plain" }), `${safeFilename(node.name)}.txt`);
       return;
     }
+    const desktop = getDesktopApi();
+    if (desktop && node.sourcePath && !node.sourceMissing) {
+      const result = await desktop.saveFileCopy(node.sourcePath, safeFilename(node.name));
+      if (!result.canceled) showStatus(result.ok ? "File saved" : result.error ?? "Save failed");
+      return;
+    }
     if (!node.blobUrl) return;
     const blob = await (await fetch(node.blobUrl)).blob();
     downloadBlob(blob, safeFilename(node.name));
-  }, []);
+  }, [showStatus]);
 
   const showSelectedInfo = useCallback(async () => {
     const s = useCanvasStore.getState();
@@ -635,6 +813,12 @@ export default function Page() {
         <button className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/90 px-3 py-2 text-xs font-medium text-zinc-400 shadow-lg shadow-black/20 backdrop-blur-md hover:bg-zinc-800 hover:text-zinc-100" onClick={() => void saveCurrentBoard()}>
           <Save size={13} /> Save Canvas
         </button>
+        <button className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/90 px-3 py-2 text-xs font-medium text-zinc-400 shadow-lg shadow-black/20 backdrop-blur-md hover:bg-zinc-800 hover:text-zinc-100" onClick={() => void saveProjectFile()}>
+          <Save size={13} /> Save Project
+        </button>
+        <button className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/90 px-3 py-2 text-xs font-medium text-zinc-400 shadow-lg shadow-black/20 backdrop-blur-md hover:bg-zinc-800 hover:text-zinc-100" onClick={() => void openProjectFile()}>
+          <FolderOpen size={13} /> Open Project
+        </button>
         <button className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/90 px-3 py-2 text-xs font-medium text-zinc-400 shadow-lg shadow-black/20 backdrop-blur-md hover:bg-zinc-800 hover:text-zinc-100" onClick={() => { void refreshBoards(); setShowBoards(true); }}>
           <FolderOpen size={13} /> Load
         </button>
@@ -709,6 +893,10 @@ export default function Page() {
                   <span>{infoNode.sourceSize !== undefined ? formatBytes(infoNode.sourceSize) : "Unknown"}</span>
                   <span className="text-zinc-500">Modified</span>
                   <span>{formatDate(infoNode.sourceLastModified)}</span>
+                  <span className="text-zinc-500">Path</span>
+                  <span className="min-w-0 break-words">{infoNode.sourcePath ?? "Not source-linked"}</span>
+                  <span className="text-zinc-500">Status</span>
+                  <span>{infoNode.sourceMissing ? "Missing source file" : infoNode.sourcePath ? "Source linked" : "Embedded / cached"}</span>
                   <span className="text-zinc-500">Dimensions</span>
                   <span>{Math.round(infoNode.sourceWidth ?? infoNode.naturalWidth)} x {Math.round(infoNode.sourceHeight ?? infoNode.naturalHeight)}</span>
                   {infoNode.type === "video" && (
@@ -810,7 +998,7 @@ export default function Page() {
             // Blob URLs are local user files; next/image cannot optimize them.
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={fullscreenNode.blobUrl ?? ""}
+              src={fullscreenNode.sourceUrl ?? fullscreenNode.blobUrl ?? fullscreenNode.thumbnailDataUrl ?? ""}
               alt={fullscreenNode.name}
               className="max-h-full max-w-full rounded-lg object-contain shadow-2xl shadow-black/60"
               style={{
@@ -821,7 +1009,7 @@ export default function Page() {
             />
           ) : (
             <video
-              src={fullscreenNode.blobUrl ?? ""}
+              src={fullscreenNode.sourceUrl ?? fullscreenNode.blobUrl ?? ""}
               className="max-h-full max-w-full rounded-lg shadow-2xl shadow-black/60"
               style={{
                 maxWidth: `calc(100vw - ${FULLSCREEN_PADDING}px)`,
